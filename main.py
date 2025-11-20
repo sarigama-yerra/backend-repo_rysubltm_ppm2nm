@@ -1,8 +1,13 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
 
-app = FastAPI()
+from database import create_document
+from schemas import Cabinet, ModuleOption, Size, Configuration
+
+app = FastAPI(title="Furniture Module Configurator API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,57 +17,93 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Static catalog data for three cabinet types
+CATALOG: List[Cabinet] = [
+    Cabinet(
+        code="BASE",
+        name="Base Cabinet",
+        modules=[
+            ModuleOption(size=Size(width=600, height=720, depth=560), materials=["MDF", "Plywood", "Solid Wood"], colors=["White", "Oak", "Walnut", "Black"]),
+            ModuleOption(size=Size(width=800, height=720, depth=560), materials=["MDF", "Plywood"], colors=["White", "Grey", "Oak"]),
+        ],
+    ),
+    Cabinet(
+        code="WALL",
+        name="Wall Cabinet",
+        modules=[
+            ModuleOption(size=Size(width=600, height=720, depth=330), materials=["MDF", "Aluminum Frame"], colors=["White", "Glass", "Black"]),
+            ModuleOption(size=Size(width=900, height=360, depth=330), materials=["MDF"], colors=["White", "Grey"]) ,
+        ],
+    ),
+    Cabinet(
+        code="TALL",
+        name="Tall Cabinet",
+        modules=[
+            ModuleOption(size=Size(width=600, height=2140, depth=560), materials=["MDF", "Plywood"], colors=["White", "Oak", "Walnut"]),
+            ModuleOption(size=Size(width=450, height=2140, depth=560), materials=["MDF"], colors=["White", "Graphite"]) ,
+        ],
+    ),
+]
+
+
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+    return {"message": "Furniture Configurator Backend Running"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+
+@app.get("/api/cabinets", response_model=List[Cabinet])
+def get_cabinets():
+    return CATALOG
+
+
+@app.get("/api/cabinets/{code}", response_model=Cabinet)
+def get_cabinet(code: str):
+    cab = next((c for c in CATALOG if c.code.lower() == code.lower()), None)
+    if not cab:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    return cab
+
+
+@app.post("/api/configurations")
+def create_configuration(config: Configuration):
+    # Basic validation: ensure selected size/material/color exist for that cabinet
+    cab = next((c for c in CATALOG if c.code == config.cabinet_code), None)
+    if not cab:
+        raise HTTPException(status_code=400, detail="Invalid cabinet code")
+
+    def size_equals(a: Size, b: Size) -> bool:
+        return a.width == b.width and a.height == b.height and a.depth == b.depth
+
+    valid_variant = next(
+        (m for m in cab.modules if size_equals(m.size, config.size)),
+        None,
+    )
+    if not valid_variant:
+        raise HTTPException(status_code=400, detail="Invalid size for selected cabinet")
+
+    if config.material not in valid_variant.materials:
+        raise HTTPException(status_code=400, detail="Invalid material for selected size")
+    if config.color not in valid_variant.colors:
+        raise HTTPException(status_code=400, detail="Invalid color for selected size")
+
+    inserted_id = create_document("configuration", config)
+    return {"id": inserted_id, "status": "saved"}
+
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
-    }
-    
+    """Simple check used by the environment to verify DB connectivity"""
+    resp = {"backend": "running"}
     try:
-        # Try to import database module
         from database import db
-        
         if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
+            resp["database"] = "connected"
+            resp["collections"] = db.list_collection_names()
         else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            resp["database"] = "not_configured"
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        resp["database"] = f"error: {str(e)[:80]}"
+    return resp
 
 
 if __name__ == "__main__":
